@@ -1,4 +1,3 @@
-import pickle
 import io
 import threading
 import numpy as np
@@ -20,6 +19,7 @@ from storage import (
     get_next_version,
     clear_production_flag,
 )
+from loaders import ModelLoaderRegistry
 
 router = APIRouter(prefix="/models", tags=["models"])
 
@@ -38,16 +38,14 @@ def _load_model_instance(file_path: str, checksum: str) -> Any:
     if not content:
         raise HTTPException(status_code=404, detail="Model file not found on disk")
     try:
-        model = pickle.loads(content)
+        loader = ModelLoaderRegistry.get_loader(file_path)
+        model = loader.load(content)
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to unpickle model: {str(e)}",
-        )
-    if not hasattr(model, "predict"):
-        raise HTTPException(
-            status_code=400,
-            detail="Model does not have a predict() method",
+            detail=f"Failed to load model: {str(e)}",
         )
     return model
 
@@ -291,8 +289,8 @@ async def register_sklearn_model(
 
     content = await file.read()
     try:
-        model = pickle.loads(content)
-        if not hasattr(model, "fit") or not hasattr(model, "predict"):
+        loader = ModelLoaderRegistry.get_loader(file.filename or "model.pkl")
+        if not hasattr(loader, "validate_sklearn") or not loader.validate_sklearn(content):
             raise ValueError("Not a valid scikit-learn model")
     except Exception as e:
         raise HTTPException(

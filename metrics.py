@@ -8,6 +8,11 @@ from sqlalchemy import desc, asc, func
 import numpy as np
 
 from storage import get_db, Experiment, Metric
+from calculators import (
+    compute_classification_metrics as _calc_classification,
+    compute_regression_metrics as _calc_regression,
+    MetricCalculatorRegistry,
+)
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
@@ -51,114 +56,14 @@ def compute_classification_metrics(
     y_true: List[Any], y_pred: List[Any]
 ) -> Tuple[Dict[str, Any], Dict[str, str]]:
     _ensure_sklearn()
-    from sklearn.metrics import (
-        accuracy_score,
-        precision_recall_fscore_support,
-        confusion_matrix,
-    )
-
-    y_true_arr = np.array(y_true)
-    y_pred_arr = np.array(y_pred)
-
-    accuracy = float(accuracy_score(y_true_arr, y_pred_arr))
-    labels = sorted(list(set(y_true_arr.tolist()) | set(y_pred_arr.tolist())))
-
-    precision, recall, f1, support = precision_recall_fscore_support(
-        y_true_arr, y_pred_arr, labels=labels, zero_division=0, average=None
-    )
-
-    macro_p, macro_r, macro_f1, _ = precision_recall_fscore_support(
-        y_true_arr, y_pred_arr, labels=labels, zero_division=0, average="macro"
-    )
-    weighted_p, weighted_r, weighted_f1, _ = precision_recall_fscore_support(
-        y_true_arr, y_pred_arr, labels=labels, zero_division=0, average="weighted"
-    )
-
-    cm = confusion_matrix(y_true_arr, y_pred_arr, labels=labels)
-
-    per_class = {}
-    for i, label in enumerate(labels):
-        per_class[str(label)] = {
-            "precision": float(precision[i]),
-            "recall": float(recall[i]),
-            "f1": float(f1[i]),
-            "support": int(support[i]),
-        }
-
-    metrics_dict: Dict[str, Any] = {
-        "accuracy": accuracy,
-        "per_class": per_class,
-        "macro_avg_precision": float(macro_p),
-        "macro_avg_recall": float(macro_r),
-        "macro_avg_f1": float(macro_f1),
-        "weighted_avg_precision": float(weighted_p),
-        "weighted_avg_recall": float(weighted_r),
-        "weighted_avg_f1": float(weighted_f1),
-        "confusion_matrix": cm.tolist(),
-        "labels": [str(l) for l in labels],
-    }
-
-    descriptions = {
-        k: CLASSIFICATION_METRIC_DESCRIPTIONS[k]
-        for k in [
-            "accuracy",
-            "precision",
-            "recall",
-            "f1",
-            "confusion_matrix",
-            "macro_avg_precision",
-            "macro_avg_recall",
-            "macro_avg_f1",
-            "weighted_avg_precision",
-            "weighted_avg_recall",
-            "weighted_avg_f1",
-        ]
-    }
-
-    return metrics_dict, descriptions
+    return _calc_classification(y_true, y_pred)
 
 
 def compute_regression_metrics(
     y_true: List[float], y_pred: List[float]
 ) -> Tuple[Dict[str, Any], Dict[str, str]]:
     _ensure_sklearn()
-    from sklearn.metrics import (
-        mean_squared_error,
-        mean_absolute_error,
-        r2_score,
-        explained_variance_score,
-    )
-
-    y_true_arr = np.array(y_true, dtype=float)
-    y_pred_arr = np.array(y_pred, dtype=float)
-
-    mse = float(mean_squared_error(y_true_arr, y_pred_arr))
-    mae = float(mean_absolute_error(y_true_arr, y_pred_arr))
-    rmse = float(np.sqrt(mse))
-    r2 = float(r2_score(y_true_arr, y_pred_arr))
-    evs = float(explained_variance_score(y_true_arr, y_pred_arr))
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        non_zero = y_true_arr != 0
-        if np.any(non_zero):
-            mape = float(
-                np.mean(np.abs((y_true_arr[non_zero] - y_pred_arr[non_zero]) / y_true_arr[non_zero])) * 100
-            )
-        else:
-            mape = None
-
-    metrics_dict: Dict[str, Any] = {
-        "mse": mse,
-        "mae": mae,
-        "rmse": rmse,
-        "r2": r2,
-        "explained_variance": evs,
-        "mape": mape,
-    }
-
-    descriptions = {k: REGRESSION_METRIC_DESCRIPTIONS[k] for k in REGRESSION_METRIC_DESCRIPTIONS}
-
-    return metrics_dict, descriptions
+    return _calc_regression(y_true, y_pred)
 
 
 class MetricCreate(BaseModel):
