@@ -14,6 +14,8 @@ from sqlalchemy import (
     ForeignKey,
     Text,
     Boolean,
+    JSON,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from pydantic_settings import BaseSettings
@@ -22,6 +24,8 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///./ml_tracker.db"
     MODEL_STORAGE_DIR: str = "./model_storage"
+    DATASET_STORAGE_DIR: str = "./dataset_storage"
+    RESULT_STORAGE_DIR: str = "./result_storage"
 
     class Config:
         env_file = ".env"
@@ -31,6 +35,12 @@ settings = Settings()
 
 MODEL_STORAGE_PATH = Path(settings.MODEL_STORAGE_DIR)
 MODEL_STORAGE_PATH.mkdir(parents=True, exist_ok=True)
+
+DATASET_STORAGE_PATH = Path(settings.DATASET_STORAGE_DIR)
+DATASET_STORAGE_PATH.mkdir(parents=True, exist_ok=True)
+
+RESULT_STORAGE_PATH = Path(settings.RESULT_STORAGE_DIR)
+RESULT_STORAGE_PATH.mkdir(parents=True, exist_ok=True)
 
 engine = create_engine(
     settings.DATABASE_URL,
@@ -57,6 +67,20 @@ class Experiment(Base):
     parameters = relationship("ExperimentParameter", back_populates="experiment", cascade="all, delete-orphan")
     metrics = relationship("Metric", back_populates="experiment", cascade="all, delete-orphan")
     models = relationship("ModelVersion", back_populates="experiment", cascade="all, delete-orphan")
+    tags = relationship("ExperimentTag", back_populates="experiment", cascade="all, delete-orphan")
+
+
+class ExperimentTag(Base):
+    __tablename__ = "experiment_tags"
+
+    id = Column(Integer, primary_key=True, index=True)
+    experiment_id = Column(Integer, ForeignKey("experiments.id"), nullable=False)
+    tag = Column(String(255), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    experiment = relationship("Experiment", back_populates="tags")
+
+    __table_args__ = (UniqueConstraint("experiment_id", "tag", name="uq_experiment_tag"),)
 
 
 class ExperimentParameter(Base):
@@ -101,6 +125,43 @@ class ModelVersion(Base):
     __table_args__ = ()
 
 
+class EvaluationReport(Base):
+    __tablename__ = "evaluation_reports"
+
+    id = Column(Integer, primary_key=True, index=True)
+    model_id = Column(Integer, ForeignKey("model_versions.id"), nullable=False, index=True)
+    model_name = Column(String(255), nullable=False)
+    version = Column(Integer, nullable=False)
+    prediction_type = Column(String(50), nullable=False)
+    metrics = Column(JSON, nullable=False)
+    metric_descriptions = Column(JSON, nullable=True)
+    num_samples = Column(Integer, nullable=False)
+    dataset_filename = Column(String(512), nullable=True)
+    label_column = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    model = relationship("ModelVersion")
+
+
+class BatchPredictionJob(Base):
+    __tablename__ = "batch_prediction_jobs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    model_id = Column(Integer, ForeignKey("model_versions.id"), nullable=False, index=True)
+    model_name = Column(String(255), nullable=False)
+    version = Column(Integer, nullable=False)
+    status = Column(String(50), nullable=False, default="pending")
+    total_rows = Column(Integer, nullable=False, default=0)
+    processed_rows = Column(Integer, nullable=False, default=0)
+    result_file_path = Column(String(512), nullable=True)
+    input_filename = Column(String(512), nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+    model = relationship("ModelVersion")
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -141,6 +202,39 @@ class FileStorage:
 
     @staticmethod
     def delete_model_file(file_path: str) -> bool:
+        path = Path(file_path)
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+
+    @staticmethod
+    def save_dataset_file(file_content: bytes, filename: str) -> str:
+        safe_name = Path(filename).name
+        dest = DATASET_STORAGE_PATH / safe_name
+        with open(dest, "wb") as f:
+            f.write(file_content)
+        return str(dest)
+
+    @staticmethod
+    def save_result_file(file_content: bytes, job_id: int, filename: str = "predictions.csv") -> str:
+        job_dir = RESULT_STORAGE_PATH / f"job_{job_id}"
+        job_dir.mkdir(parents=True, exist_ok=True)
+        dest = job_dir / filename
+        with open(dest, "wb") as f:
+            f.write(file_content)
+        return str(dest)
+
+    @staticmethod
+    def read_file_bytes(file_path: str) -> Optional[bytes]:
+        path = Path(file_path)
+        if path.exists():
+            with open(path, "rb") as f:
+                return f.read()
+        return None
+
+    @staticmethod
+    def delete_file(file_path: str) -> bool:
         path = Path(file_path)
         if path.exists():
             path.unlink()

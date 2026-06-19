@@ -1,13 +1,164 @@
+import json
 from datetime import datetime
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Dict, Any, Tuple
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, asc, func
+import numpy as np
 
 from storage import get_db, Experiment, Metric
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
+
+
+CLASSIFICATION_METRIC_DESCRIPTIONS: Dict[str, str] = {
+    "accuracy": "准确率（Accuracy）：预测正确的样本数占总样本数的比例，越接近1越好。适用于类别均衡的场景。",
+    "precision": "精确率（Precision）：被预测为正类的样本中真正是正类的比例，越接近1越好。用于关注误报代价高的场景（如垃圾邮件过滤）。",
+    "recall": "召回率（Recall）：真正是正类的样本中被预测为正类的比例，越接近1越好。用于关注漏报代价高的场景（如疾病筛查）。",
+    "f1": "F1 分数：精确率和召回率的调和平均值，越接近1越好。综合评估模型在精确率和召回率上的表现，类别不均衡时更可靠。",
+    "confusion_matrix": "混淆矩阵：行代表真实标签，列代表预测标签。对角线元素是预测正确的数量，非对角线是预测错误的数量，可直观看到模型易混淆的类别。",
+    "support": "样本数（Support）：每个类别在数据集中的实际样本数量。",
+    "macro_avg_precision": "宏平均精确率：对每个类别计算精确率后取算术平均，不考虑样本量差异，适合评估模型对每个类别的整体表现。",
+    "macro_avg_recall": "宏平均召回率：对每个类别计算召回率后取算术平均。",
+    "macro_avg_f1": "宏平均 F1：对每个类别计算 F1 后取算术平均。",
+    "weighted_avg_precision": "加权平均精确率：按每类样本量加权计算精确率，考虑类别不均衡。",
+    "weighted_avg_recall": "加权平均召回率：按每类样本量加权计算召回率。",
+    "weighted_avg_f1": "加权平均 F1：按每类样本量加权计算 F1。",
+}
+
+REGRESSION_METRIC_DESCRIPTIONS: Dict[str, str] = {
+    "mse": "均方误差（MSE）：预测值与真实值之差的平方的平均值，越小越好。对较大误差惩罚更重。",
+    "mae": "平均绝对误差（MAE）：预测值与真实值之差的绝对值的平均值，越小越好。对异常值不敏感。",
+    "rmse": "均方根误差（RMSE）：MSE 的平方根，与目标变量单位一致，越小越好。直观反映预测偏差大小。",
+    "r2": "决定系数（R²）：衡量模型对数据变异性的解释能力，取值越接近1越好。1 表示完美预测，0 表示等价于均值预测，负数表示比均值还差。",
+    "explained_variance": "解释方差：模型解释的方差占总方差的比例，越接近1越好。",
+    "mape": "平均绝对百分比误差（MAPE）：预测误差占真实值百分比的平均值，越小越好。便于跨业务场景理解误差相对大小。",
+}
+
+
+def _ensure_sklearn():
+    try:
+        import sklearn  # noqa: F401
+    except ImportError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"scikit-learn is required for evaluation: {str(e)}",
+        )
+
+
+def compute_classification_metrics(
+    y_true: List[Any], y_pred: List[Any]
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    _ensure_sklearn()
+    from sklearn.metrics import (
+        accuracy_score,
+        precision_recall_fscore_support,
+        confusion_matrix,
+    )
+
+    y_true_arr = np.array(y_true)
+    y_pred_arr = np.array(y_pred)
+
+    accuracy = float(accuracy_score(y_true_arr, y_pred_arr))
+    labels = sorted(list(set(y_true_arr.tolist()) | set(y_pred_arr.tolist())))
+
+    precision, recall, f1, support = precision_recall_fscore_support(
+        y_true_arr, y_pred_arr, labels=labels, zero_division=0, average=None
+    )
+
+    macro_p, macro_r, macro_f1, _ = precision_recall_fscore_support(
+        y_true_arr, y_pred_arr, labels=labels, zero_division=0, average="macro"
+    )
+    weighted_p, weighted_r, weighted_f1, _ = precision_recall_fscore_support(
+        y_true_arr, y_pred_arr, labels=labels, zero_division=0, average="weighted"
+    )
+
+    cm = confusion_matrix(y_true_arr, y_pred_arr, labels=labels)
+
+    per_class = {}
+    for i, label in enumerate(labels):
+        per_class[str(label)] = {
+            "precision": float(precision[i]),
+            "recall": float(recall[i]),
+            "f1": float(f1[i]),
+            "support": int(support[i]),
+        }
+
+    metrics_dict: Dict[str, Any] = {
+        "accuracy": accuracy,
+        "per_class": per_class,
+        "macro_avg_precision": float(macro_p),
+        "macro_avg_recall": float(macro_r),
+        "macro_avg_f1": float(macro_f1),
+        "weighted_avg_precision": float(weighted_p),
+        "weighted_avg_recall": float(weighted_r),
+        "weighted_avg_f1": float(weighted_f1),
+        "confusion_matrix": cm.tolist(),
+        "labels": [str(l) for l in labels],
+    }
+
+    descriptions = {
+        k: CLASSIFICATION_METRIC_DESCRIPTIONS[k]
+        for k in [
+            "accuracy",
+            "precision",
+            "recall",
+            "f1",
+            "confusion_matrix",
+            "macro_avg_precision",
+            "macro_avg_recall",
+            "macro_avg_f1",
+            "weighted_avg_precision",
+            "weighted_avg_recall",
+            "weighted_avg_f1",
+        ]
+    }
+
+    return metrics_dict, descriptions
+
+
+def compute_regression_metrics(
+    y_true: List[float], y_pred: List[float]
+) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    _ensure_sklearn()
+    from sklearn.metrics import (
+        mean_squared_error,
+        mean_absolute_error,
+        r2_score,
+        explained_variance_score,
+    )
+
+    y_true_arr = np.array(y_true, dtype=float)
+    y_pred_arr = np.array(y_pred, dtype=float)
+
+    mse = float(mean_squared_error(y_true_arr, y_pred_arr))
+    mae = float(mean_absolute_error(y_true_arr, y_pred_arr))
+    rmse = float(np.sqrt(mse))
+    r2 = float(r2_score(y_true_arr, y_pred_arr))
+    evs = float(explained_variance_score(y_true_arr, y_pred_arr))
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        non_zero = y_true_arr != 0
+        if np.any(non_zero):
+            mape = float(
+                np.mean(np.abs((y_true_arr[non_zero] - y_pred_arr[non_zero]) / y_true_arr[non_zero])) * 100
+            )
+        else:
+            mape = None
+
+    metrics_dict: Dict[str, Any] = {
+        "mse": mse,
+        "mae": mae,
+        "rmse": rmse,
+        "r2": r2,
+        "explained_variance": evs,
+        "mape": mape,
+    }
+
+    descriptions = {k: REGRESSION_METRIC_DESCRIPTIONS[k] for k in REGRESSION_METRIC_DESCRIPTIONS}
+
+    return metrics_dict, descriptions
 
 
 class MetricCreate(BaseModel):
@@ -26,16 +177,6 @@ class MetricResponse(BaseModel):
 
     class Config:
         from_attributes = True
-
-
-class MetricRankingResponse(BaseModel):
-    experiment_id: int
-    experiment_name: str
-    project: str
-    metric_name: str
-    value: float
-    step: int
-    timestamp: datetime
 
 
 class LatestMetricResponse(BaseModel):
