@@ -15,6 +15,14 @@ from storage import (
 
 router = APIRouter(prefix="/experiments", tags=["experiments"])
 
+VALID_STATUSES = {"running", "success", "failed"}
+TERMINAL_STATUSES = {"success", "failed"}
+ALLOWED_TRANSITIONS = {
+    "running": {"success", "failed"},
+    "success": set(),
+    "failed": set(),
+}
+
 
 class ExperimentCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
@@ -233,11 +241,18 @@ def update_experiment(
         raise HTTPException(status_code=404, detail="Experiment not found")
 
     if exp_update.status:
-        valid_statuses = {"running", "success", "failed"}
-        if exp_update.status not in valid_statuses:
+        if exp_update.status not in VALID_STATUSES:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid status. Must be one of: {valid_statuses}",
+                detail=f"Invalid status. Must be one of: {VALID_STATUSES}",
+            )
+        allowed = ALLOWED_TRANSITIONS.get(exp.status, set())
+        if exp_update.status not in allowed and exp_update.status != exp.status:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot transition from '{exp.status}' to '{exp_update.status}'. "
+                f"Terminal states (success/failed) cannot be reverted to running, "
+                f"and cannot switch between success and failed.",
             )
         exp.status = exp_update.status
 

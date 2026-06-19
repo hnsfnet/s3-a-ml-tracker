@@ -3,6 +3,7 @@ from pathlib import Path
 
 from .base import BaseModelLoader
 from .sklearn_loader import SklearnModelLoader
+from .torch_loader import TorchModelLoader
 
 
 class ModelLoaderRegistry:
@@ -47,3 +48,4 @@ class ModelLoaderRegistry:
 
 
 ModelLoaderRegistry.register(SklearnModelLoader, default=True)
+ModelLoaderRegistry.register(TorchModelLoader)

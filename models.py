@@ -69,7 +69,11 @@ def get_cached_model(model_id: int, file_path: str, checksum: str) -> Any:
 
         model = _load_model_instance(file_path, checksum)
         pred_type = _detect_prediction_type(model)
-        classes = list(model.classes_) if hasattr(model, "classes_") else None
+        classes = (
+            [c.item() if isinstance(c, np.generic) else c for c in list(model.classes_)]
+            if hasattr(model, "classes_")
+            else None
+        )
         _model_cache[model_id] = {
             "model": model,
             "checksum": checksum,

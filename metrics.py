@@ -69,7 +69,7 @@ def compute_regression_metrics(
 class MetricCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     value: float
-    step: Optional[int] = Field(default=0)
+    step: Optional[int] = Field(default=None)
 
 
 class MetricResponse(BaseModel):
@@ -107,7 +107,7 @@ def _get_next_step(db: Session, experiment_id: int, metric_name: str) -> int:
         Metric.experiment_id == experiment_id,
         Metric.name == metric_name,
     ).scalar()
-    return (max_step or -1) + 1
+    return (max_step if max_step is not None else -1) + 1
 
 
 @router.post("/{experiment_id}", response_model=MetricResponse)
