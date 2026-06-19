@@ -1,6 +1,7 @@
 import os
 import hashlib
 import shutil
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
@@ -19,6 +20,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from pydantic_settings import BaseSettings
+
+_version_lock = threading.Lock()
 
 
 class Settings(BaseSettings):
@@ -122,7 +125,7 @@ class ModelVersion(Base):
 
     experiment = relationship("Experiment", back_populates="models")
 
-    __table_args__ = ()
+    __table_args__ = (UniqueConstraint("name", "version", name="uq_model_name_version"),)
 
 
 class EvaluationReport(Base):
@@ -244,8 +247,9 @@ class FileStorage:
 
 def get_next_version(db, model_name: str) -> int:
     from sqlalchemy import func
-    max_version = db.query(func.max(ModelVersion.version)).filter(ModelVersion.name == model_name).scalar()
-    return (max_version or 0) + 1
+    with _version_lock:
+        max_version = db.query(func.max(ModelVersion.version)).filter(ModelVersion.name == model_name).scalar()
+        return (max_version or 0) + 1
 
 
 def clear_production_flag(db, model_name: str):

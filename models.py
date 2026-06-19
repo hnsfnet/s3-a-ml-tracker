@@ -10,6 +10,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from sqlalchemy.exc import IntegrityError
+
 from storage import (
     get_db,
     Experiment,
@@ -69,11 +71,13 @@ def get_cached_model(model_id: int, file_path: str, checksum: str) -> Any:
 
         model = _load_model_instance(file_path, checksum)
         pred_type = _detect_prediction_type(model)
+        classes = list(model.classes_) if hasattr(model, "classes_") else None
         _model_cache[model_id] = {
             "model": model,
             "checksum": checksum,
             "mtime": current_mtime,
             "prediction_type": pred_type,
+            "classes": classes,
         }
         return model
 
@@ -81,6 +85,12 @@ def get_cached_model(model_id: int, file_path: str, checksum: str) -> Any:
 def get_cached_model_info(model_id: int) -> Optional[Dict[str, Any]]:
     with _model_cache_lock:
         return _model_cache.get(model_id)
+
+
+def get_cached_model_classes(model_id: int) -> Optional[List[Any]]:
+    with _model_cache_lock:
+        entry = _model_cache.get(model_id)
+        return entry.get("classes") if entry else None
 
 
 def invalidate_model_cache(model_id: Optional[int] = None, model_name: Optional[str] = None, db: Optional[Session] = None):
@@ -190,10 +200,17 @@ def _run_prediction(mv: ModelVersion, features: List[List[float]], predict_proba
     model = get_cached_model(mv.id, mv.file_path, mv.checksum)
     info = get_cached_model_info(mv.id) or {}
     pred_type = info.get("prediction_type") or _detect_prediction_type(model)
+    classes = get_cached_model_classes(mv.id)
 
     X = np.array(features, dtype=float)
     preds = model.predict(X)
     preds_list = preds.tolist() if hasattr(preds, "tolist") else list(preds)
+
+    if pred_type == "classification" and classes is not None:
+        preds_list = [
+            classes[int(p)] if isinstance(p, (int, float, np.integer, np.floating)) else p
+            for p in preds_list
+        ]
 
     result = PredictResponse(
         model_id=mv.id,
@@ -206,10 +223,12 @@ def _run_prediction(mv: ModelVersion, features: List[List[float]], predict_proba
     if predict_proba and pred_type == "classification" and hasattr(model, "predict_proba"):
         proba = model.predict_proba(X)
         result.probabilities = proba.tolist() if hasattr(proba, "tolist") else [list(p) for p in proba]
-        if hasattr(model, "classes_"):
-            result.classes = list(model.classes_)
+        result.classes = classes
 
     return result
+
+
+MAX_RETRIES = 3
 
 
 @router.post("/register/{experiment_id}", response_model=ModelVersionResponse)
@@ -223,28 +242,40 @@ async def register_model(
     if not exp:
         raise HTTPException(status_code=404, detail="Experiment not found")
 
-    version = get_next_version(db, name)
     content = await file.read()
 
-    file_path, file_size, checksum = FileStorage.save_model_file(
-        content, experiment_id, name, version
-    )
-
-    mv = ModelVersion(
-        experiment_id=experiment_id,
-        name=name,
-        version=version,
-        file_path=file_path,
-        file_size=file_size,
-        checksum=checksum,
-        is_production=False,
-        created_at=datetime.utcnow(),
-    )
-    db.add(mv)
-    db.commit()
-    db.refresh(mv)
-    invalidate_model_cache(model_name=name, db=db)
-    return _to_response(mv)
+    last_error = None
+    for attempt in range(MAX_RETRIES):
+        version = get_next_version(db, name)
+        file_path, file_size, checksum = FileStorage.save_model_file(
+            content, experiment_id, name, version
+        )
+        try:
+            mv = ModelVersion(
+                experiment_id=experiment_id,
+                name=name,
+                version=version,
+                file_path=file_path,
+                file_size=file_size,
+                checksum=checksum,
+                is_production=False,
+                created_at=datetime.utcnow(),
+            )
+            db.add(mv)
+            db.commit()
+            db.refresh(mv)
+            invalidate_model_cache(model_name=name, db=db)
+            return _to_response(mv)
+        except IntegrityError as e:
+            db.rollback()
+            FileStorage.delete_file(file_path)
+            last_error = e
+            if attempt < MAX_RETRIES - 1:
+                continue
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to register model after {MAX_RETRIES} attempts due to version conflict: {str(last_error)}",
+            )
 
 
 @router.post("/register-sklearn/{experiment_id}", response_model=ModelVersionResponse)
@@ -269,26 +300,38 @@ async def register_sklearn_model(
             detail=f"Invalid scikit-learn model file: {str(e)}",
         )
 
-    version = get_next_version(db, name)
-    file_path, file_size, checksum = FileStorage.save_model_file(
-        content, experiment_id, name, version
-    )
-
-    mv = ModelVersion(
-        experiment_id=experiment_id,
-        name=name,
-        version=version,
-        file_path=file_path,
-        file_size=file_size,
-        checksum=checksum,
-        is_production=False,
-        created_at=datetime.utcnow(),
-    )
-    db.add(mv)
-    db.commit()
-    db.refresh(mv)
-    invalidate_model_cache(model_name=name, db=db)
-    return _to_response(mv)
+    last_error = None
+    for attempt in range(MAX_RETRIES):
+        version = get_next_version(db, name)
+        file_path, file_size, checksum = FileStorage.save_model_file(
+            content, experiment_id, name, version
+        )
+        try:
+            mv = ModelVersion(
+                experiment_id=experiment_id,
+                name=name,
+                version=version,
+                file_path=file_path,
+                file_size=file_size,
+                checksum=checksum,
+                is_production=False,
+                created_at=datetime.utcnow(),
+            )
+            db.add(mv)
+            db.commit()
+            db.refresh(mv)
+            invalidate_model_cache(model_name=name, db=db)
+            return _to_response(mv)
+        except IntegrityError as e:
+            db.rollback()
+            FileStorage.delete_file(file_path)
+            last_error = e
+            if attempt < MAX_RETRIES - 1:
+                continue
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to register model after {MAX_RETRIES} attempts due to version conflict: {str(last_error)}",
+            )
 
 
 @router.get("", response_model=List[ModelVersionResponse])

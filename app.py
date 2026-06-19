@@ -30,6 +30,7 @@ import comparator
 from models import (
     get_cached_model,
     get_cached_model_info,
+    get_cached_model_classes,
     _detect_prediction_type,
 )
 from metrics import compute_classification_metrics, compute_regression_metrics
@@ -129,6 +130,7 @@ def _process_batch_job(job_id: int, db_url: str, chunk_size: int = 1000):
         model = get_cached_model(mv.id, mv.file_path, mv.checksum)
         info = get_cached_model_info(mv.id) or {}
         pred_type = info.get("prediction_type") or _detect_prediction_type(model)
+        classes = get_cached_model_classes(mv.id)
 
         input_bytes = FileStorage.read_file_bytes(
             str(Path(job.input_filename)) if Path(job.input_filename).is_absolute()
@@ -150,6 +152,13 @@ def _process_batch_job(job_id: int, db_url: str, chunk_size: int = 1000):
             chunk = X[start:end]
             preds = model.predict(chunk)
             preds_list = preds.tolist() if hasattr(preds, "tolist") else list(preds)
+
+            if pred_type == "classification" and classes is not None:
+                preds_list = [
+                    classes[int(p)] if isinstance(p, (int, float, np.integer, np.floating)) else p
+                    for p in preds_list
+                ]
+
             all_preds.extend(preds_list)
 
             with _jobs_lock:
@@ -429,6 +438,7 @@ async def create_evaluation_report(
 
     model = get_cached_model(mv.id, mv.file_path, mv.checksum)
     info = get_cached_model_info(mv.id) or {}
+    classes = get_cached_model_classes(mv.id)
     has_predict_proba = "prediction_type" not in info and hasattr(model, "predict_proba")
     resolved_type = _resolve_prediction_type(
         prediction_type,
@@ -438,6 +448,12 @@ async def create_evaluation_report(
 
     preds = model.predict(X)
     y_pred = preds.tolist() if hasattr(preds, "tolist") else list(preds)
+
+    if resolved_type == "classification" and classes is not None:
+        y_pred = [
+            classes[int(p)] if isinstance(p, (int, float, np.integer, np.floating)) else p
+            for p in y_pred
+        ]
 
     if resolved_type == "regression":
         try:

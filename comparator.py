@@ -6,6 +6,12 @@ from sqlalchemy import func
 
 from storage import get_db, Experiment, ExperimentParameter, Metric
 
+SQLITE_BATCH_SIZE = 500
+
+
+def _batch_ids(ids: List[int], batch_size: int = SQLITE_BATCH_SIZE) -> List[List[int]]:
+    return [ids[i:i + batch_size] for i in range(0, len(ids), batch_size)]
+
 router = APIRouter(prefix="/comparator", tags=["comparator"])
 
 
@@ -38,9 +44,10 @@ class ComparisonResult(BaseModel):
 
 
 def _get_experiments(db: Session, experiment_ids: List[int]) -> List[Experiment]:
-    experiments = (
-        db.query(Experiment).filter(Experiment.id.in_(experiment_ids)).all()
-    )
+    experiments: List[Experiment] = []
+    for batch in _batch_ids(experiment_ids):
+        batch_exps = db.query(Experiment).filter(Experiment.id.in_(batch)).all()
+        experiments.extend(batch_exps)
     found_ids = {exp.id for exp in experiments}
     missing = set(experiment_ids) - found_ids
     if missing:
@@ -54,46 +61,47 @@ def _get_experiments(db: Session, experiment_ids: List[int]) -> List[Experiment]
 def _collect_parameters(
     db: Session, experiment_ids: List[int]
 ) -> Dict[int, Dict[str, str]]:
-    params = (
-        db.query(ExperimentParameter)
-        .filter(ExperimentParameter.experiment_id.in_(experiment_ids))
-        .all()
-    )
     result: Dict[int, Dict[str, str]] = {eid: {} for eid in experiment_ids}
-    for p in params:
-        result[p.experiment_id][p.key] = p.value
+    for batch in _batch_ids(experiment_ids):
+        params = (
+            db.query(ExperimentParameter)
+            .filter(ExperimentParameter.experiment_id.in_(batch))
+            .all()
+        )
+        for p in params:
+            result[p.experiment_id][p.key] = p.value
     return result
 
 
 def _collect_latest_metrics(
     db: Session, experiment_ids: List[int]
 ) -> Dict[int, Dict[str, float]]:
-    subquery = (
-        db.query(
-            Metric.experiment_id,
-            Metric.name,
-            func.max(Metric.step).label("max_step"),
-        )
-        .filter(Metric.experiment_id.in_(experiment_ids))
-        .group_by(Metric.experiment_id, Metric.name)
-        .subquery()
-    )
-
-    metrics = (
-        db.query(Metric)
-        .join(
-            subquery,
-            (Metric.experiment_id == subquery.c.experiment_id)
-            & (Metric.name == subquery.c.name)
-            & (Metric.step == subquery.c.max_step),
-        )
-        .filter(Metric.experiment_id.in_(experiment_ids))
-        .all()
-    )
-
     result: Dict[int, Dict[str, float]] = {eid: {} for eid in experiment_ids}
-    for m in metrics:
-        result[m.experiment_id][m.name] = m.value
+    for batch in _batch_ids(experiment_ids):
+        subquery = (
+            db.query(
+                Metric.experiment_id,
+                Metric.name,
+                func.max(Metric.step).label("max_step"),
+            )
+            .filter(Metric.experiment_id.in_(batch))
+            .group_by(Metric.experiment_id, Metric.name)
+            .subquery()
+        )
+
+        metrics = (
+            db.query(Metric)
+            .join(
+                subquery,
+                (Metric.experiment_id == subquery.c.experiment_id)
+                & (Metric.name == subquery.c.name)
+                & (Metric.step == subquery.c.max_step),
+            )
+            .filter(Metric.experiment_id.in_(batch))
+            .all()
+        )
+        for m in metrics:
+            result[m.experiment_id][m.name] = m.value
     return result
 
 

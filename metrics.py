@@ -196,6 +196,15 @@ def _check_experiment(db: Session, experiment_id: int):
     return exp
 
 
+def _get_next_step(db: Session, experiment_id: int, metric_name: str) -> int:
+    from sqlalchemy import func
+    max_step = db.query(func.max(Metric.step)).filter(
+        Metric.experiment_id == experiment_id,
+        Metric.name == metric_name,
+    ).scalar()
+    return (max_step or -1) + 1
+
+
 @router.post("/{experiment_id}", response_model=MetricResponse)
 def log_metric(
     experiment_id: int,
@@ -203,11 +212,14 @@ def log_metric(
     db: Session = Depends(get_db),
 ):
     _check_experiment(db, experiment_id)
+    step = metric_create.step
+    if step is None:
+        step = _get_next_step(db, experiment_id, metric_create.name)
     metric = Metric(
         experiment_id=experiment_id,
         name=metric_create.name,
         value=metric_create.value,
-        step=metric_create.step or 0,
+        step=step,
         timestamp=datetime.utcnow(),
     )
     db.add(metric)
@@ -225,12 +237,19 @@ def log_metrics_batch(
     _check_experiment(db, experiment_id)
     now = datetime.utcnow()
     created = []
+    next_steps = {}
     for item in metrics_batch:
+        step = item.step
+        if step is None:
+            if item.name not in next_steps:
+                next_steps[item.name] = _get_next_step(db, experiment_id, item.name)
+            step = next_steps[item.name]
+            next_steps[item.name] += 1
         metric = Metric(
             experiment_id=experiment_id,
             name=item.name,
             value=item.value,
-            step=item.step or 0,
+            step=step,
             timestamp=now,
         )
         db.add(metric)
